@@ -2,3 +2,4 @@ streamlit>=1.58.0
 rembg>=2.0.76
 pillow>=12.2.0
 numpy
+onnxruntime
