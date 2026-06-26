@@ -1,10 +1,13 @@
+import gc
 import io
 import zipfile
 
 import numpy as np
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageFilter
 from rembg import new_session, remove
+
+MAX_INPUT_PX = 1500  # límite antes de enviar a rembg — suficiente para canvas 1200×1200
 
 PLATFORM_SPECS = {
     "Google Shopping": {"size": (1200, 1200), "fill": 0.85},
@@ -21,10 +24,17 @@ BG_COLORS = {
     "Transparente": (0, 0, 0, 0),
 }
 
+MODELS = {
+    "Productos generales": "isnet-general-use",
+    "Ropa y textiles": "u2net_cloth_seg",
+    "Fondo complejo o exterior": "u2net",
+    "Objetos con bordes finos": "silueta",
+}
+
 
 @st.cache_resource
-def get_session_general():
-    return new_session("isnet-general-use")
+def get_session(model_name: str):
+    return new_session(model_name)
 
 
 @st.cache_resource
@@ -32,12 +42,24 @@ def get_session_human():
     return new_session("u2net_human_seg")
 
 
-def remove_background(raw_bytes: bytes, quitar_mano: bool, umbral_humano: int = 50) -> Image.Image:
-    session_general = get_session_general()
+def preprocess(raw_bytes: bytes) -> bytes:
+    """Reduce la imagen a MAX_INPUT_PX en su lado más largo para ahorrar RAM en rembg."""
+    img = Image.open(io.BytesIO(raw_bytes))
+    if max(img.size) > MAX_INPUT_PX:
+        img.thumbnail((MAX_INPUT_PX, MAX_INPUT_PX), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    return raw_bytes
+
+
+def remove_background(raw_bytes: bytes, model_name: str, quitar_mano: bool) -> Image.Image:
+    raw_bytes = preprocess(raw_bytes)
+    session = get_session(model_name)
 
     mask_general_bytes = remove(
         raw_bytes,
-        session=session_general,
+        session=session,
         only_mask=True,
         post_process_mask=True,
     )
@@ -55,22 +77,40 @@ def remove_background(raw_bytes: bytes, quitar_mano: bool, umbral_humano: int = 
 
         arr_general = np.array(mask_general)
         arr_human = np.array(mask_human)
-        arr_final = np.where(arr_human > umbral_humano, 0, arr_general).astype("uint8")
 
-        # Fallback: si la resta dejó la máscara casi vacía, usar la general
-        if arr_final.sum() < arr_general.sum() * 0.05:
-            mask_final = mask_general
-        else:
-            mask_final = Image.fromarray(arr_final, mode="L")
-    else:
-        mask_final = mask_general
+        # Solo restar si la máscara humana no supera el 60% de la general
+        # (si supera ese umbral, el modelo detectó demasiado como "humano" y es poco confiable)
+        overlap = (arr_human > 128).sum()
+        general_area = (arr_general > 128).sum()
+        if general_area > 0 and overlap / general_area < 0.60:
+            arr_final = np.where(arr_human > 128, 0, arr_general).astype("uint8")
+            # Verificación adicional: no usar si la resta dejó menos del 15% de la máscara original
+            if arr_final.sum() >= arr_general.sum() * 0.15:
+                mask_general = Image.fromarray(arr_final, mode="L")
 
     original = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
-    original.putalpha(mask_final)
+    original.putalpha(mask_general)
     return original
 
 
-def compose_on_canvas(img_rgba: Image.Image, platform: str, bg_color_name: str) -> Image.Image:
+def add_shadow(img_rgba: Image.Image, canvas_size: tuple, x: int, y: int) -> Image.Image:
+    """Genera una sombra difusa debajo del producto y la compone sobre el canvas."""
+    shadow_offset = max(8, canvas_size[0] // 120)
+    blur_radius = max(12, canvas_size[0] // 80)
+
+    # Extraer el canal alfa del producto y convertirlo en sombra gris oscuro
+    alpha = img_rgba.split()[3]
+    shadow_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    shadow_color = Image.new("RGBA", img_rgba.size, (30, 30, 30, 110))
+    shadow_color.putalpha(alpha)
+    shadow_layer.paste(shadow_color, (x + shadow_offset, y + shadow_offset), shadow_color)
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(blur_radius))
+    return shadow_layer
+
+
+def compose_on_canvas(
+    img_rgba: Image.Image, platform: str, bg_color_name: str, con_sombra: bool
+) -> Image.Image:
     spec = PLATFORM_SPECS[platform]
     canvas_size = spec["size"]
     fill = spec["fill"]
@@ -81,7 +121,6 @@ def compose_on_canvas(img_rgba: Image.Image, platform: str, bg_color_name: str) 
         img_rgba = img_rgba.crop(bbox)
 
     if canvas_size is None:
-        # Tamaño original: solo cambiar fondo
         if bg_color_name == "Transparente":
             return img_rgba
         canvas = Image.new("RGBA", img_rgba.size, bg_color)
@@ -92,13 +131,18 @@ def compose_on_canvas(img_rgba: Image.Image, platform: str, bg_color_name: str) 
     max_h = int(canvas_size[1] * fill)
     img_rgba.thumbnail((max_w, max_h), Image.LANCZOS)
 
+    x = (canvas_size[0] - img_rgba.width) // 2
+    y = (canvas_size[1] - img_rgba.height) // 2
+
     if bg_color_name == "Transparente":
         canvas = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
     else:
         canvas = Image.new("RGBA", canvas_size, bg_color)
 
-    x = (canvas_size[0] - img_rgba.width) // 2
-    y = (canvas_size[1] - img_rgba.height) // 2
+    if con_sombra and bg_color_name != "Transparente":
+        shadow = add_shadow(img_rgba, canvas_size, x, y)
+        canvas = Image.alpha_composite(canvas, shadow)
+
     canvas.paste(img_rgba, (x, y), img_rgba)
     return canvas
 
@@ -126,10 +170,22 @@ with st.sidebar:
     st.header("Configuración")
     platform = st.selectbox("Plataforma de destino", list(PLATFORM_SPECS.keys()))
     bg_color_name = st.selectbox("Color de fondo", list(BG_COLORS.keys()))
+    model_label = st.selectbox(
+        "Tipo de producto",
+        list(MODELS.keys()),
+        index=0,
+        help="Elegí el tipo que mejor describa tus productos para obtener mejores resultados.",
+    )
+    model_name = MODELS[model_label]
     quitar_mano = st.checkbox(
         "Las fotos tienen una mano sosteniendo el producto (quitar mano/brazo)",
         value=False,
         help="Activa un segundo modelo de segmentación. Más lento pero elimina piel/manos.",
+    )
+    con_sombra = st.checkbox(
+        "Agregar sombra sutil al producto",
+        value=False,
+        help="Añade una sombra difusa debajo del producto, estilo catálogo profesional.",
     )
     st.divider()
     spec = PLATFORM_SPECS[platform]
@@ -157,13 +213,15 @@ if uploaded_files:
         progress = st.progress(0, text="Iniciando...")
 
         for i, file in enumerate(uploaded_files):
-            progress.progress((i) / len(uploaded_files), text=f"Procesando {file.name}…")
+            progress.progress(i / len(uploaded_files), text=f"Procesando {file.name}…")
             try:
                 raw = file.read()
-                img_sin_fondo = remove_background(raw, quitar_mano)
-                img_final = compose_on_canvas(img_sin_fondo, platform, bg_color_name)
+                img_sin_fondo = remove_background(raw, model_name, quitar_mano)
+                img_final = compose_on_canvas(img_sin_fondo, platform, bg_color_name, con_sombra)
                 nombre_salida = file.name.rsplit(".", 1)[0] + "_catalogo.png"
                 resultados[nombre_salida] = image_to_bytes(img_final)
+                del img_sin_fondo, img_final
+                gc.collect()
             except Exception as e:
                 errores.append((file.name, str(e)))
                 st.error(f"Error al procesar **{file.name}**: {e}")
@@ -175,14 +233,12 @@ if uploaded_files:
         elif resultados:
             st.success(f"Se procesaron {len(resultados)} imagen(es) correctamente.")
 
-            # Vista previa en grilla
             cols = st.columns(min(4, len(resultados)))
             for idx, (nombre, data) in enumerate(resultados.items()):
                 img = Image.open(io.BytesIO(data))
                 preview = resize_for_preview(img)
                 cols[idx % 4].image(preview, caption=nombre, use_container_width=True)
 
-            # ZIP en memoria
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for nombre, data in resultados.items():
