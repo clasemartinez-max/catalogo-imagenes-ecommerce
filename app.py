@@ -199,7 +199,7 @@ with st.sidebar:
     else:
         st.caption("Se conserva el tamaño original de cada imagen.")
     st.divider()
-    if st.button("🗑️ Limpiar y empezar de nuevo", use_container_width=True):
+    if st.button("🗑️ Limpiar y empezar de nuevo", width="stretch"):
         limpiar_sesion()
 
 uploaded_files = st.file_uploader(
@@ -248,7 +248,7 @@ if st.session_state.resultados:
     for idx, (nombre, data) in enumerate(st.session_state.resultados.items()):
         img = Image.open(io.BytesIO(data))
         preview = resize_for_preview(img)
-        cols[idx % 4].image(preview, caption=nombre, use_container_width=True)
+        cols[idx % 4].image(preview, caption=nombre, width="stretch")
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
