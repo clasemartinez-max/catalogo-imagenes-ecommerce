@@ -229,8 +229,13 @@ if uploaded_files:
                 img_sin_fondo = remove_background(raw, model_name, quitar_mano)
                 img_final = compose_on_canvas(img_sin_fondo, platform, bg_color_name, con_sombra)
                 nombre_salida = file.name.rsplit(".", 1)[0] + "_catalogo.png"
-                st.session_state.resultados[nombre_salida] = image_to_bytes(img_final)
-                del img_sin_fondo, img_final, raw
+                full_bytes = image_to_bytes(img_final)
+                preview_bytes = image_to_bytes(resize_for_preview(img_final))
+                st.session_state.resultados[nombre_salida] = {
+                    "full": full_bytes,
+                    "preview": preview_bytes,
+                }
+                del img_sin_fondo, img_final, raw, full_bytes, preview_bytes
                 gc.collect()
             except Exception as e:
                 errores.append((file.name, str(e)))
@@ -245,15 +250,13 @@ if st.session_state.resultados:
     st.success(f"Se procesaron {len(st.session_state.resultados)} imagen(es) correctamente.")
 
     cols = st.columns(min(4, len(st.session_state.resultados)))
-    for idx, (nombre, data) in enumerate(st.session_state.resultados.items()):
-        img = Image.open(io.BytesIO(data))
-        preview = resize_for_preview(img)
-        cols[idx % 4].image(preview, caption=nombre, width="stretch")
+    for idx, (nombre, entry) in enumerate(st.session_state.resultados.items()):
+        cols[idx % 4].image(entry["preview"], caption=nombre, width="stretch")
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for nombre, data in st.session_state.resultados.items():
-            zf.writestr(nombre, data)
+        for nombre, entry in st.session_state.resultados.items():
+            zf.writestr(nombre, entry["full"])
     zip_buf.seek(0)
 
     st.download_button(
