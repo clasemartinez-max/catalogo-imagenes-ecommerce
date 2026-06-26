@@ -78,10 +78,10 @@ def remove_background(raw_bytes: bytes, model_name: str, quitar_mano: bool) -> I
         arr_general = np.array(mask_general)
         arr_human = np.array(mask_human)
 
-        # Usar umbral alto (200/255) para restar solo píxeles con alta confianza de ser humanos
-        arr_final = np.where(arr_human > 200, 0, arr_general).astype("uint8")
+        # Restar píxeles con confianza de ser humanos >= 50% (128/255)
+        arr_final = np.where(arr_human > 128, 0, arr_general).astype("uint8")
 
-        # Fallback solo si la resta dejó la imagen prácticamente vacía
+        # Fallback solo si la resta dejó menos del 5% de la máscara original (imagen casi vacía)
         if arr_final.sum() >= arr_general.sum() * 0.05:
             mask_general = Image.fromarray(arr_final, mode="L")
 
@@ -201,7 +201,6 @@ with st.sidebar:
     st.divider()
     if st.button("🗑️ Limpiar y empezar de nuevo", use_container_width=True):
         limpiar_sesion()
-        st.rerun()
 
 uploaded_files = st.file_uploader(
     "Subí las fotos de producto",
