@@ -78,15 +78,12 @@ def remove_background(raw_bytes: bytes, model_name: str, quitar_mano: bool) -> I
         arr_general = np.array(mask_general)
         arr_human = np.array(mask_human)
 
-        # Solo restar si la máscara humana no supera el 60% de la general
-        # (si supera ese umbral, el modelo detectó demasiado como "humano" y es poco confiable)
-        overlap = (arr_human > 128).sum()
-        general_area = (arr_general > 128).sum()
-        if general_area > 0 and overlap / general_area < 0.60:
-            arr_final = np.where(arr_human > 128, 0, arr_general).astype("uint8")
-            # Verificación adicional: no usar si la resta dejó menos del 15% de la máscara original
-            if arr_final.sum() >= arr_general.sum() * 0.15:
-                mask_general = Image.fromarray(arr_final, mode="L")
+        # Usar umbral alto (200/255) para restar solo píxeles con alta confianza de ser humanos
+        arr_final = np.where(arr_human > 200, 0, arr_general).astype("uint8")
+
+        # Fallback solo si la resta dejó la imagen prácticamente vacía
+        if arr_final.sum() >= arr_general.sum() * 0.05:
+            mask_general = Image.fromarray(arr_final, mode="L")
 
     original = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
     original.putalpha(mask_general)
