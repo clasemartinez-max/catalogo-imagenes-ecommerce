@@ -163,6 +163,14 @@ st.set_page_config(page_title="Limpieza de fondo para catálogo", layout="wide")
 st.title("Limpieza de fondo para catálogo de e-commerce")
 st.caption("Eliminá el fondo de tus fotos de producto y exportalas listas para cada plataforma.")
 
+# Inicializar session state
+if "resultados" not in st.session_state:
+    st.session_state.resultados = {}
+
+def limpiar_sesion():
+    st.session_state.resultados = {}
+    gc.collect()
+
 with st.sidebar:
     st.header("Configuración")
     platform = st.selectbox("Plataforma de destino", list(PLATFORM_SPECS.keys()))
@@ -190,6 +198,10 @@ with st.sidebar:
         st.caption(f"Canvas: {spec['size'][0]}×{spec['size'][1]} px · Relleno: {int(spec['fill']*100)}%")
     else:
         st.caption("Se conserva el tamaño original de cada imagen.")
+    st.divider()
+    if st.button("🗑️ Limpiar y empezar de nuevo", use_container_width=True):
+        limpiar_sesion()
+        st.rerun()
 
 uploaded_files = st.file_uploader(
     "Subí las fotos de producto",
@@ -205,7 +217,9 @@ if uploaded_files:
         )
 
     if st.button("Procesar todas", type="primary"):
-        resultados = {}
+        # Limpiar resultados anteriores antes de cada nueva corrida
+        limpiar_sesion()
+
         errores = []
         progress = st.progress(0, text="Iniciando...")
 
@@ -216,8 +230,8 @@ if uploaded_files:
                 img_sin_fondo = remove_background(raw, model_name, quitar_mano)
                 img_final = compose_on_canvas(img_sin_fondo, platform, bg_color_name, con_sombra)
                 nombre_salida = file.name.rsplit(".", 1)[0] + "_catalogo.png"
-                resultados[nombre_salida] = image_to_bytes(img_final)
-                del img_sin_fondo, img_final
+                st.session_state.resultados[nombre_salida] = image_to_bytes(img_final)
+                del img_sin_fondo, img_final, raw
                 gc.collect()
             except Exception as e:
                 errores.append((file.name, str(e)))
@@ -225,29 +239,30 @@ if uploaded_files:
 
         progress.progress(1.0, text="Listo.")
 
-        if errores and not resultados:
+        if errores and not st.session_state.resultados:
             st.warning("No se pudo procesar ninguna imagen. Revisá los archivos e intentá de nuevo.")
-        elif resultados:
-            st.success(f"Se procesaron {len(resultados)} imagen(es) correctamente.")
 
-            cols = st.columns(min(4, len(resultados)))
-            for idx, (nombre, data) in enumerate(resultados.items()):
-                img = Image.open(io.BytesIO(data))
-                preview = resize_for_preview(img)
-                cols[idx % 4].image(preview, caption=nombre, use_container_width=True)
+if st.session_state.resultados:
+    st.success(f"Se procesaron {len(st.session_state.resultados)} imagen(es) correctamente.")
 
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for nombre, data in resultados.items():
-                    zf.writestr(nombre, data)
-            zip_buf.seek(0)
+    cols = st.columns(min(4, len(st.session_state.resultados)))
+    for idx, (nombre, data) in enumerate(st.session_state.resultados.items()):
+        img = Image.open(io.BytesIO(data))
+        preview = resize_for_preview(img)
+        cols[idx % 4].image(preview, caption=nombre, use_container_width=True)
 
-            st.download_button(
-                label=f"Descargar todas ({len(resultados)} imágenes) — .zip",
-                data=zip_buf,
-                file_name="catalogo_procesado.zip",
-                mime="application/zip",
-            )
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for nombre, data in st.session_state.resultados.items():
+            zf.writestr(nombre, data)
+    zip_buf.seek(0)
+
+    st.download_button(
+        label=f"Descargar todas ({len(st.session_state.resultados)} imágenes) — .zip",
+        data=zip_buf,
+        file_name="catalogo_procesado.zip",
+        mime="application/zip",
+    )
 
 st.divider()
 st.markdown(
