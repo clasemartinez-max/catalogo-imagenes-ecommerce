@@ -2,12 +2,11 @@ import gc
 import io
 import zipfile
 
-import numpy as np
 import streamlit as st
 from PIL import Image, ImageFilter
 from rembg import new_session, remove
 
-MAX_INPUT_PX = 1500  # límite antes de enviar a rembg — suficiente para canvas 1200×1200
+MAX_INPUT_PX = 1500
 
 PLATFORM_SPECS = {
     "Google Shopping": {"size": (1200, 1200), "fill": 0.85},
@@ -25,10 +24,10 @@ BG_COLORS = {
 }
 
 MODELS = {
+    "Objetos con bordes finos": "silueta",
     "Productos generales": "isnet-general-use",
     "Ropa y textiles": "u2net_cloth_seg",
     "Fondo complejo o exterior": "u2net",
-    "Objetos con bordes finos": "silueta",
 }
 
 
@@ -37,13 +36,7 @@ def get_session(model_name: str):
     return new_session(model_name)
 
 
-@st.cache_resource
-def get_session_human():
-    return new_session("u2net_human_seg")
-
-
 def preprocess(raw_bytes: bytes) -> bytes:
-    """Reduce la imagen a MAX_INPUT_PX en su lado más largo para ahorrar RAM en rembg."""
     img = Image.open(io.BytesIO(raw_bytes))
     if max(img.size) > MAX_INPUT_PX:
         img.thumbnail((MAX_INPUT_PX, MAX_INPUT_PX), Image.LANCZOS)
@@ -53,49 +46,19 @@ def preprocess(raw_bytes: bytes) -> bytes:
     return raw_bytes
 
 
-def remove_background(raw_bytes: bytes, model_name: str, quitar_mano: bool) -> Image.Image:
+def remove_background(raw_bytes: bytes, model_name: str) -> Image.Image:
     raw_bytes = preprocess(raw_bytes)
     session = get_session(model_name)
-
-    mask_general_bytes = remove(
-        raw_bytes,
-        session=session,
-        only_mask=True,
-        post_process_mask=True,
-    )
-    mask_general = Image.open(io.BytesIO(mask_general_bytes)).convert("L")
-
-    if quitar_mano:
-        session_human = get_session_human()
-        mask_human_bytes = remove(
-            raw_bytes,
-            session=session_human,
-            only_mask=True,
-            post_process_mask=True,
-        )
-        mask_human = Image.open(io.BytesIO(mask_human_bytes)).convert("L")
-
-        arr_general = np.array(mask_general)
-        arr_human = np.array(mask_human)
-
-        # Restar píxeles con confianza de ser humanos >= 50% (128/255)
-        arr_final = np.where(arr_human > 128, 0, arr_general).astype("uint8")
-
-        # Fallback solo si la resta dejó menos del 5% de la máscara original (imagen casi vacía)
-        if arr_final.sum() >= arr_general.sum() * 0.05:
-            mask_general = Image.fromarray(arr_final, mode="L")
-
+    mask_bytes = remove(raw_bytes, session=session, only_mask=True, post_process_mask=True)
+    mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
     original = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
-    original.putalpha(mask_general)
+    original.putalpha(mask)
     return original
 
 
 def add_shadow(img_rgba: Image.Image, canvas_size: tuple, x: int, y: int) -> Image.Image:
-    """Genera una sombra difusa debajo del producto y la compone sobre el canvas."""
     shadow_offset = max(8, canvas_size[0] // 120)
     blur_radius = max(12, canvas_size[0] // 80)
-
-    # Extraer el canal alfa del producto y convertirlo en sombra gris oscuro
     alpha = img_rgba.split()[3]
     shadow_layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
     shadow_color = Image.new("RGBA", img_rgba.size, (30, 30, 30, 110))
@@ -163,13 +126,14 @@ st.set_page_config(page_title="Limpieza de fondo para catálogo", layout="wide")
 st.title("Limpieza de fondo para catálogo de e-commerce")
 st.caption("Eliminá el fondo de tus fotos de producto y exportalas listas para cada plataforma.")
 
-# Inicializar session state
 if "resultados" not in st.session_state:
     st.session_state.resultados = {}
+
 
 def limpiar_sesion():
     st.session_state.resultados = {}
     gc.collect()
+
 
 with st.sidebar:
     st.header("Configuración")
@@ -182,11 +146,6 @@ with st.sidebar:
         help="Elegí el tipo que mejor describa tus productos para obtener mejores resultados.",
     )
     model_name = MODELS[model_label]
-    quitar_mano = st.checkbox(
-        "Las fotos tienen una mano sosteniendo el producto (quitar mano/brazo)",
-        value=False,
-        help="Activa un segundo modelo de segmentación. Más lento pero elimina piel/manos.",
-    )
     con_sombra = st.checkbox(
         "Agregar sombra sutil al producto",
         value=False,
@@ -216,9 +175,7 @@ if uploaded_files:
         )
 
     if st.button("Procesar todas", type="primary"):
-        # Limpiar resultados anteriores antes de cada nueva corrida
         limpiar_sesion()
-
         errores = []
         progress = st.progress(0, text="Iniciando...")
 
@@ -226,7 +183,7 @@ if uploaded_files:
             progress.progress(i / len(uploaded_files), text=f"Procesando {file.name}…")
             try:
                 raw = file.read()
-                img_sin_fondo = remove_background(raw, model_name, quitar_mano)
+                img_sin_fondo = remove_background(raw, model_name)
                 img_final = compose_on_canvas(img_sin_fondo, platform, bg_color_name, con_sombra)
                 nombre_salida = file.name.rsplit(".", 1)[0] + "_catalogo.png"
                 full_bytes = image_to_bytes(img_final)
